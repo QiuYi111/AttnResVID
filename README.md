@@ -1,94 +1,260 @@
-# DeepVID v2: Self-Supervised Denoising with Decoupled Spatiotemporal Enhancement for Low-Photon Voltage Imaging
+# AttnResVID: Attention-Residual Mechanisms for Low-Photon Voltage Imaging Denoising
 
-![DeepVID v2](assets/image.png)
+An extension of [DeepVIDv2](https://github.com/bu-cisl/DeepVIDv2) with learnable depth-wise feature aggregation for improved low-photon voltage imaging denoising.
 
-This repository is the PyTorch implementation of DeepVID v2, as presented in the following preprint:
+> **Paper coming soon.** This repository contains the implementation for our ongoing research on attention-based residual learning in self-supervised video denoising.
 
-Liu, C., Lu, J., Wu, Y., Ye, X., Ahrens, A. M., Platisa, J., ... & Tian, L. (2024). DeepVID v2: Self-Supervised Denoising with Decoupled Spatiotemporal Enhancement for Low-Photon Voltage Imaging. bioRxiv, 2024-05.
+---
 
-https://www.biorxiv.org/content/10.1101/2024.05.16.594448
+## Overview
 
-## Requirements
+AttnResVID introduces **Attention-Residual (AttnRes)** mechanisms into DeepVIDv2, enabling the network to adaptively aggregate historical features across network depth. Unlike standard fixed residual connections (`y = x + F(x)`), AttnRes learns to weight contributions from previous layers:
 
-**environment.yaml** lists dependencies for the repository. 
+```
+y = x + F(x) + γ · A(x_{l-K}, ..., x_{l-1}; x_l)
+```
 
-There is no specific requirement on the version of packages. This repository is tested on the environment:
+where `A(·)` is a depth-wise attention aggregator and `γ` is a learnable gate.
 
-- Linux (AlmaLinux 8)
-- Python 3.8
-- PyTorch 1.10.2
-- CUDA 11.3
+### Key Features
+
+- **Minimal Intrusion**: Wraps existing ResBlocks without rewriting the core architecture
+- **Configurable**: All parameters controlled via CLI arguments
+- **Ablation-Friendly**: Multiple fusion modes for controlled experiments
+- **Training Stable**: Gated injection with learnable initialization
+
+---
 
 ## Installation
 
-1. Clone the repository and navigate to the folder
+### Using uv (Recommended)
 
 ```bash
-$ git clone https://github.com/bu-cisl/DeepVIDv2.git
-$ cd DeepVIDv2
+# Install uv if you haven't already
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Clone the repository
+git clone https://github.com/QiuYi111/AttnResVID.git
+cd AttnResVID
+
+# Install dependencies
+uv sync
 ```
 
-2. Create a virtual environment with conda, and install PyTorch and other dependencies.
+### Using conda
 
 ```bash
-$ conda env create -f environment.yml
-$ conda activate DeepVIDv2
-$ conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+# Create conda environment
+conda env create -f environment.yml
+conda activate attnresvid
+
+# Install PyTorch
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 ```
 
-3. Delete placeholder.txt in datasets and results folder
+---
+
+## Quick Start
+
+### Baseline Training (DeepVIDv2)
 
 ```bash
-$ rm datasets/placeholder.txt
-$ rm results/placeholder.txt
+uv run python scripts/train.py \
+  --noisy-data-paths ./datasets \
+  --model-string baseline_run
 ```
 
-## Training
-
-1. Place noisy images in datasets folder. Each image should be a tif file in shape T x H x W. 
-
-2. Training with DeepVID v2.
+### With Attention-Residual (Bottleneck Mode)
 
 ```bash
-$ python -m deepvidv2 train [--noisy NOISY_DATA_PATHS] [-n INPUT_PRE_POST_FRAME] [-m EDGE_PRE_POST_FRAME]
+uv run python scripts/train.py \
+  --noisy-data-paths ./datasets \
+  --attnres-enabled \
+  --attnres-mode bottleneck \
+  --attnres-history-len 2 \
+  --model-string attnres_run
 ```
 
- - The default option will train with images in datasets folder, using 7 frames as input frames (N) and all available frames to extract edge information (M). 
+### Inference
 
 ```bash
-$ python -m deepvidv2 train
+uv run python scripts/inference.py \
+  --noisy-data-paths ./datasets \
+  --model attnres_run
 ```
 
- - For more options, please refer to the manual:
+---
+
+## Experiments
+
+### Main Experiments
+
+| Experiment | Description | Command |
+|------------|-------------|---------|
+| **E0** | Baseline DeepVIDv2 | `--attnres-enabled false` |
+| **E1** | Bottleneck-only (last 2 blocks) | `--attnres-enabled --attnres-mode bottleneck --attnres-history-len 2` |
+| **E2** | Full bottleneck (history_len=3) | `--attnres-enabled --attnres-history-len 3` |
+| **E3** | Bottleneck + Decoder | `--attnres-enabled --attnres-mode bottleneck_decoder` |
+| **E4** | Stage-wise injection | `--attnres-enabled --attnres-mode stagewise --attnres-history-len 4` |
+
+### Control Experiments
+
+| Experiment | Description | Command |
+|------------|-------------|---------|
+| **C1** | Concat fusion (no attention) | `--attnres-enabled --attnres-fusion-mode concat` |
+| **C2** | Gate-only (no history) | `--attnres-enabled --attnres-fusion-mode gate_only` |
+
+### Parameter Sweeps
 
 ```bash
-$ python -m deepvidv2 train --help
+# Temperature sweep
+uv run python scripts/train.py --attnres-enabled --attnres-temperature 0.5 --model-string temp_0.5
+uv run python scripts/train.py --attnres-enabled --attnres-temperature 1.0 --model-string temp_1.0
+uv run python scripts/train.py --attnres-enabled --attnres-temperature 2.0 --model-string temp_2.0
+
+# History length sweep
+uv run python scripts/train.py --attnres-enabled --attnres-history-len 2 --model-string hist_2
+uv run python scripts/train.py --attnres-enabled --attnres-history-len 3 --model-string hist_3
+uv run python scripts/train.py --attnres-enabled --attnres-history-len 4 --model-string hist_4
 ```
 
-## Inference
+---
 
-1. Inference with DeepVID v2.
+## Configuration
+
+### AttnRes Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `--attnres-enabled` | flag | False | Enable AttnRes mechanism |
+| `--attnres-mode` | str | bottleneck | Mode: off, bottleneck, bottleneck_decoder, stagewise |
+| `--attnres-history-len` | int | 2 | Number of historical features to aggregate |
+| `--attnres-temperature` | float | 1.0 | Softmax temperature (lower = sharper) |
+| `--attnres-gate-init` | float | 0.0 | Initial gate value (0 = start as identity) |
+| `--attnres-score-fn` | str | gap_linear | Score function: gap_linear, conv1x1_gap_linear |
+| `--attnres-gate-type` | str | scalar | Gate type: scalar, channel |
+| `--attnres-detach-history` | flag | False | Detach history for stability |
+| `--attnres-fusion-mode` | str | attention | Fusion: attention, concat, gate_only |
+| `--attnres-share-proj` | flag | False | Share projections across blocks |
+
+### Example Configurations
 
 ```bash
-$ python -m deepvidv2 inference [--noisy NOISY_DATA_PATHS] [--model MODEL_STRING]
+# Conservative: minimal injection, high stability
+--attnres-enabled --attnres-mode bottleneck --attnres-history-len 2 --attnres-gate-init 0.0 --attnres-temperature 2.0
+
+# Aggressive: full history, low temperature
+--attnres-enabled --attnres-mode stagewise --attnres-history-len 4 --attnres-temperature 0.5
+
+# Experimental: channel-wise gating
+--attnres-enabled --attnres-gate-type channel --attnres-fusion-mode attention
 ```
 
- - MODEL_STRING is the folder name of trained models in results folder, in a format of YYMMDD-HHMMSS
+---
 
- - The default option will inference all images in datasets folder. 
+## Architecture
+
+### DeepVIDv2 with AttnRes
+
+```
+Input Block (ConvBlock)
+    ↓
+┌─────────────────────────────────────────┐
+│  4 × ResBlock (with optional AttnRes)    │
+│  ┌─────────────────────────────────────┐ │
+│  │  x → ResBlock → y                    │ │
+│  │                    ↓                 │ │
+│  │  + AttnRes: A(history) → gated      │ │
+│  │                    ↓                 │ │
+│  │  output = x + residual + gated_attn  │ │
+│  └─────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+    ↓
+Pre-out Block (ConvBlock)
+    ↓
+Output Block (2 × ConvBlock)
+```
+
+### AttnRes Components
+
+- **`AttnResConfig`**: Configuration dataclass with all hyperparameters
+- **`DepthAttentionAggregator`**: GAP → learned query → softmax attention
+- **`LearnedGate`**: Scalar or channel-wise gating with sigmoid activation
+- **`StageHistoryManager`**: Stage-local feature history tracking
+- **`AttnResBlockWrapper`**: Non-invasive wrapper for ResBlocks
+
+---
+
+## Module Structure
+
+```
+source/attnres/
+├── __init__.py          # Module exports
+├── config.py            # AttnResConfig dataclass
+├── aggregator.py        # DepthAttentionAggregator, RMSNorm2d, LearnedGate
+├── gated_residual.py    # GatedAttnResidual
+├── history_manager.py   # StageHistoryManager
+├── wrapper.py           # AttnResBlockWrapper
+└── control.py           # Control variants (ConcatFusionBlock, GateOnlyBlock)
+```
+
+---
+
+## Testing
+
+Run the test suite to verify installation:
 
 ```bash
-$ python -m deepvidv2 inference [--model MODEL_STRING]
+uv run python test_attnres.py
 ```
 
- - For more options, please refer to the manual:
-
-```bash
-$ python -m deepvidv2 inference --help
+Expected output:
+```
+============================================================
+✓ ALL TESTS PASSED!
+============================================================
 ```
 
-## Contributors
+---
 
-For any questions or requests, please contact the following author:
+## Citation
 
- - Chang Liu ( cl6 [at] bu [dot] edu )
+```bibtex
+@article{attnresvid2025,
+  title={Attention-Residual Mechanisms for Low-Photon Voltage Imaging Denoising},
+  author={[Coming Soon]},
+  journal={},
+  year={2025}
+}
+```
+
+Please also cite the original DeepVIDv2 paper:
+
+```bibtex
+@article{liu2024deepvid2,
+  title={DeepVID v2: Self-Supervised Denoising with Decoupled Spatiotemporal Enhancement for Low-Photon Voltage Imaging},
+  author={Liu, Chang and Lu, Jiaming and Wu, Yuting and Ye, Xinhao and Ahrens, Adam M and Platisa, Jelena and Tian, Lu},
+  journal={bioRxiv},
+  pages={2024--05},
+  year={2024},
+  publisher={Cold Spring Harbor Laboratory Preprint}
+}
+```
+
+---
+
+## Acknowledgments
+
+This work extends [DeepVIDv2](https://github.com/bu-cisl/DeepVIDv2) by the Boston University Computational Imaging & Synthetic Aperture Systems Lab.
+
+---
+
+## License
+
+This project inherits the license from the original DeepVIDv2 repository.
+
+---
+
+## Contact
+
+For questions about AttnResVID, please open an issue on GitHub or contact [Authors].
