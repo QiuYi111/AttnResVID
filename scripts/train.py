@@ -9,7 +9,8 @@ from torch.utils.data import ConcatDataset
 from source.dataset_collection import DeepVIDv2Dataset
 from source.network_collection import DeepVIDv2
 from source.worker_collection import DeepVIDv2Worker
-from source.utils import JsonSaver
+from source.utils import JsonSaver, log_model_info
+from source.attnres.config import AttnResConfig
 
 
 def get_parser(parent=None):
@@ -44,6 +45,21 @@ def get_parser(parent=None):
     network_group.add_argument("--norm-type", type=str, default="batch", help="type of normalization")
     network_group.add_argument("--activation-type", type=str, default="prelu", help="type of activation")
     network_group.add_argument("--resblock-activation-out-type", type=str, default=None, help="type of resblock activation")
+
+    # Attention-Residual (AttnRes) params
+    attnres_group = parser.add_argument_group("attnres", "Attention-Residual parameters")
+    attnres_group.add_argument("--attnres-enabled", action="store_true", help="Enable Attention-Residual mechanism")
+    attnres_group.add_argument("--attnres-mode", type=str, choices=["off", "bottleneck", "bottleneck_decoder", "stagewise"], default="bottleneck", help="AttnRes mode: which blocks use attention")
+    attnres_group.add_argument("--attnres-history-len", type=int, default=2, help="Number of historical feature maps to aggregate")
+    attnres_group.add_argument("--attnres-temperature", type=float, default=1.0, help="Softmax temperature for attention (lower = sharper)")
+    attnres_group.add_argument("--attnres-gate-init", type=float, default=0.0, help="Initial value for learnable gate (0 = start as identity)")
+    attnres_group.add_argument("--attnres-score-fn", type=str, choices=["gap_linear", "conv1x1_gap_linear"], default="gap_linear", help="Method to compute attention scores")
+    attnres_group.add_argument("--attnres-gate-type", type=str, choices=["scalar", "channel"], default="scalar", help="Type of gating (scalar or per-channel)")
+    attnres_group.add_argument("--attnres-detach-history", action="store_true", help="Detach history from computation graph (stability)")
+    attnres_group.add_argument("--attnres-fusion-mode", type=str, choices=["attention", "concat", "gate_only"], default="attention", help="How to combine features")
+    attnres_group.add_argument("--attnres-share-proj", action="store_true", help="Share projection parameters across blocks")
+    attnres_group.add_argument("--attnres-bottleneck-start-idx", type=int, default=2, help="Index where bottleneck blocks start")
+    attnres_group.add_argument("--attnres-decoder-enabled", action="store_true", help="Extend AttnRes to decoder blocks")
 
     # training worker params
     worker_group = parser.add_argument_group("worker", "worker parameters")
@@ -113,6 +129,9 @@ def process_args(args):
         args.model_string,
     )
 
+    # Create AttnRes config from args
+    args.attnres_config = AttnResConfig.from_args(args)
+
     return args
 
 
@@ -129,7 +148,12 @@ def run_worker(args):
 
     # create network
     print("Creating network...")
-    network = DeepVIDv2(args)
+    network = DeepVIDv2(args, attnres_config=args.attnres_config)
+
+    # log model info
+    print("Logging model info...")
+    input_size = (args.batch_size, args.in_channels, 64, 64)  # Default spatial size
+    log_model_info(network, args.output_dir, input_size=(1, args.in_channels, 64, 64))
 
     # create worker
     print("Creating worker...")

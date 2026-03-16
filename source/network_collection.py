@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Optional
 
 
 ##################################################
@@ -235,8 +236,11 @@ class BaseModule(nn.Module):
 
 
 class DeepVIDv2(BaseModule):
-    def __init__(self, args):
+    def __init__(self, args, attnres_config: Optional["AttnResConfig"] = None):
         super(DeepVIDv2, self).__init__(args)
+
+        # Store AttnRes config
+        self.attnres_config = attnres_config
 
         self.in_block = ConvBlock(
             in_channels=self.in_channels,
@@ -290,16 +294,66 @@ class DeepVIDv2(BaseModule):
             ),
         )
 
+        # Apply AttnRes wrapping if config is provided and enabled
+        if attnres_config is not None and attnres_config.enabled:
+            self._apply_attnres()
+
     def parse_args(self, args):
         super(DeepVIDv2, self).parse_args(args)
 
+    def _apply_attnres(self):
+        """Wrap ResBlocks with AttnRes functionality."""
+        from source.attnres.wrapper import AttnResBlockWrapper
+        from source.attnres.history_manager import StageHistoryManager
+
+        config = self.attnres_config
+        num_blocks = len(self.model)
+        wrapped_blocks = nn.ModuleList()
+
+        for i, block in enumerate(self.model):
+            if config.should_use_attnres(i, num_blocks):
+                wrapped = AttnResBlockWrapper(
+                    block=block,
+                    config=config,
+                    block_idx=i,
+                    num_channels=self.num_feature,
+                )
+                wrapped_blocks.append(wrapped)
+            else:
+                wrapped_blocks.append(block)
+
+        self.model = wrapped_blocks
+
+        # Create history manager
+        self.history_manager = StageHistoryManager(config)
+
     def forward(self, x, encode=False):
+        # Clear history at start of forward pass if using AttnRes
+        if hasattr(self, "history_manager"):
+            self.history_manager.clear()
+
         out = self.in_block(x)
         identity = out
         feat_list = []
 
+        num_blocks = len(self.model)
+
         for i, block in enumerate(self.model):
-            out = block(out)
+            # Get history for this block if using AttnRes
+            history = []
+            if hasattr(self, "history_manager") and self.attnres_config.enabled:
+                history = self.history_manager.get_history(i, num_blocks)
+
+            # Forward pass - check if block is AttnResBlockWrapper by attribute
+            if hasattr(block, "use_attnres") and block.use_attnres:
+                out = block(out, history)
+            else:
+                out = block(out)
+
+            # Add to history for future blocks if using AttnRes
+            if hasattr(self, "history_manager") and self.attnres_config.enabled:
+                self.history_manager.add_feature(out, i, num_blocks)
+
             feat_list.append(out)
 
         out = self.pre_out_block(out)
@@ -311,3 +365,41 @@ class DeepVIDv2(BaseModule):
             return out, feat_list
         else:
             return out
+
+    def get_attnres_info(self) -> Optional[dict]:
+        """Get information about AttnRes blocks (if enabled)."""
+        if not hasattr(self, "attnres_config") or not self.attnres_config.enabled:
+            return None
+
+        info = {
+            "config": {
+                "enabled": self.attnres_config.enabled,
+                "mode": self.attnres_config.mode,
+                "history_len": self.attnres_config.history_len,
+                "temperature": self.attnres_config.temperature,
+                "fusion_mode": self.attnres_config.fusion_mode,
+            },
+            "blocks": [],
+        }
+
+        for i, block in enumerate(self.model):
+            if hasattr(block, "get_attnres_info"):
+                block_info = block.get_attnres_info()
+                block_info["block_idx"] = i
+                info["blocks"].append(block_info)
+
+        return info
+
+    def get_gate_values(self) -> Optional[dict]:
+        """Get current gate values for all AttnRes blocks."""
+        if not hasattr(self, "attnres_config") or not self.attnres_config.enabled:
+            return None
+
+        gate_values = {}
+
+        for i, block in enumerate(self.model):
+            if hasattr(block, "attnres") and block.attnres is not None:
+                if hasattr(block.attnres, "gate") and block.attnres.gate is not None:
+                    gate_values[f"block_{i}"] = block.attnres.gate.get_gate_value()
+
+        return gate_values
