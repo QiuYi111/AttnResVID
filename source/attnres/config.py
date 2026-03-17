@@ -18,7 +18,7 @@ class AttnResConfig:
         mode: Which blocks use AttnRes
             - "off": Disabled (same as enabled=False)
             - "bottleneck": Only last 2 bottleneck blocks
-            - "bottleneck_decoder": Last 2 blocks + decoder
+            - "bottleneck_decoder": Last 2 blocks + decoder blocks
             - "stagewise": All blocks with stage-wise history
         history_len: Number of previous feature maps to aggregate
         temperature: Softmax temperature for attention (lower = sharper)
@@ -36,7 +36,7 @@ class AttnResConfig:
             - "gate_only": Only gate, no history (C2 control)
         share_proj: Whether to share projection parameters across blocks
         bottleneck_start_idx: Index where bottleneck blocks start (default 2/4)
-        decoder_enabled: Whether to extend to decoder blocks
+        decoder_blocks: Number of decoder blocks to apply AttnRes to
     """
 
     enabled: bool = False
@@ -50,7 +50,7 @@ class AttnResConfig:
     fusion_mode: Literal["attention", "concat", "gate_only"] = "attention"
     share_proj: bool = False
     bottleneck_start_idx: int = 2
-    decoder_enabled: bool = False
+    decoder_blocks: int = 1
 
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -67,6 +67,9 @@ class AttnResConfig:
 
         if self.gate_init < 0 or self.gate_init > 1:
             raise ValueError(f"gate_init must be in [0, 1], got {self.gate_init}")
+
+        if self.decoder_blocks < 0:
+            raise ValueError(f"decoder_blocks must be >= 0, got {self.decoder_blocks}")
 
     @classmethod
     def from_args(cls, args) -> "AttnResConfig":
@@ -90,15 +93,16 @@ class AttnResConfig:
             fusion_mode=getattr(args, "attnres_fusion_mode", "attention"),
             share_proj=getattr(args, "attnres_share_proj", False),
             bottleneck_start_idx=getattr(args, "attnres_bottleneck_start_idx", 2),
-            decoder_enabled=getattr(args, "attnres_decoder_enabled", False),
+            decoder_blocks=getattr(args, "attnres_decoder_blocks", 1),
         )
 
-    def should_use_attnres(self, block_idx: int, total_blocks: int) -> bool:
+    def should_use_attnres(self, block_idx: int, total_blocks: int, block_type: str = "resblock") -> bool:
         """Determine if a block should use AttnRes based on mode and index.
 
         Args:
             block_idx: Index of the block in the model
             total_blocks: Total number of blocks in the model
+            block_type: Type of block ("resblock" or "decoder")
 
         Returns:
             True if this block should use AttnRes
@@ -107,9 +111,15 @@ class AttnResConfig:
             return False
 
         if self.mode == "bottleneck":
-            return block_idx >= self.bottleneck_start_idx
+            return block_type == "resblock" and block_idx >= self.bottleneck_start_idx
         elif self.mode == "bottleneck_decoder":
-            return block_idx >= self.bottleneck_start_idx
+            # Apply to bottleneck resblocks AND decoder blocks
+            if block_type == "resblock":
+                return block_idx >= self.bottleneck_start_idx
+            elif block_type == "decoder":
+                # Apply to first N decoder blocks
+                return block_idx < self.decoder_blocks
+            return False
         elif self.mode == "stagewise":
             return True
         return False

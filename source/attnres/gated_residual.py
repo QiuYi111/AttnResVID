@@ -103,14 +103,21 @@ class GatedAttnResidual(nn.Module):
         """
         if self.config.fusion_mode == "attention":
             # Aggregate history using attention
+            # Note: Current implementation aggregates only history features.
+            # To include current layer x_l in attention (as per README formula),
+            # uncomment the following line and update aggregator call:
+            # attn_feat = self.aggregator(history, current=x)
             history = history[-self.history_len:] if len(history) > self.history_len else history
 
             if history:
-                attn_feat = self.aggregator(history)
+                attn_feat = self.aggregator(history, current=x)
                 gated_attn = self.gate(attn_feat)
                 return residual + gated_attn
             else:
-                return residual
+                # No history yet, use current directly (self-attention)
+                attn_feat = x
+                gated_attn = self.gate(attn_feat)
+                return residual + gated_attn
 
         elif self.config.fusion_mode == "gate_only":
             # Only apply gate, no history aggregation (C2 control)

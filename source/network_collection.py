@@ -302,27 +302,45 @@ class DeepVIDv2(BaseModule):
         super(DeepVIDv2, self).parse_args(args)
 
     def _apply_attnres(self):
-        """Wrap ResBlocks with AttnRes functionality."""
-        from source.attnres.wrapper import AttnResBlockWrapper
+        """Wrap ResBlocks and decoder blocks with AttnRes functionality."""
+        from source.attnres.wrapper import AttnResBlockWrapper, AttnResDecoderWrapper
         from source.attnres.history_manager import StageHistoryManager
 
         config = self.attnres_config
         num_blocks = len(self.model)
         wrapped_blocks = nn.ModuleList()
 
+        # Wrap ResBlocks (encoder/bottleneck)
         for i, block in enumerate(self.model):
-            if config.should_use_attnres(i, num_blocks):
+            use_attnres = config.should_use_attnres(i, num_blocks, block_type="resblock")
+            if use_attnres:
                 wrapped = AttnResBlockWrapper(
                     block=block,
                     config=config,
                     block_idx=i,
                     num_channels=self.num_feature,
+                    use_attnres=True,
                 )
                 wrapped_blocks.append(wrapped)
             else:
                 wrapped_blocks.append(block)
 
         self.model = wrapped_blocks
+
+        # Wrap decoder blocks if mode is bottleneck_decoder
+        self.decoder_wrappers = nn.ModuleList()
+        if config.mode == "bottleneck_decoder":
+            # Wrap pre_out_block as decoder block 0
+            use_decoder_attnres = config.should_use_attnres(0, config.decoder_blocks, block_type="decoder")
+            if use_decoder_attnres:
+                self.pre_out_block = AttnResDecoderWrapper(
+                    block=self.pre_out_block,
+                    config=config,
+                    block_idx=0,
+                    num_channels=self.num_feature,
+                    use_attnres=True,
+                )
+                self.decoder_wrappers.append(self.pre_out_block)
 
         # Create history manager
         self.history_manager = StageHistoryManager(config)
@@ -356,7 +374,19 @@ class DeepVIDv2(BaseModule):
 
             feat_list.append(out)
 
-        out = self.pre_out_block(out)
+        # Forward through pre_out_block (decoder) with history if using bottleneck_decoder mode
+        if (hasattr(self, "attnres_config") and
+            self.attnres_config.enabled and
+            self.attnres_config.mode == "bottleneck_decoder" and
+            hasattr(self.pre_out_block, "use_attnres") and
+            self.pre_out_block.use_attnres):
+            # Get decoder history (includes encoder/bottleneck features)
+            decoder_history = self.history_manager.get_history(0, self.attnres_config.decoder_blocks, block_type="decoder")
+            out = self.pre_out_block(out, decoder_history)
+            # Add decoder output to history
+            self.history_manager.add_feature(out, 0, self.attnres_config.decoder_blocks, block_type="decoder")
+        else:
+            out = self.pre_out_block(out)
 
         out += identity
         out = self.out_block(out)

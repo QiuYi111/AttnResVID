@@ -30,26 +30,46 @@ class StageHistoryManager:
         self.histories: Dict[str, List[torch.Tensor]] = {}
         self._stage_names: List[str] = []
 
-    def get_stage_name(self, block_idx: int, total_blocks: int) -> str:
+    def get_stage_name(self, block_idx: int, total_blocks: int, block_type: str = "resblock") -> str:
         """Get the stage name for a given block.
 
         Args:
             block_idx: Index of the block
             total_blocks: Total number of blocks
+            block_type: Type of block ("resblock" or "decoder")
 
         Returns:
             Stage name string
         """
         if self.config.mode == "stagewise":
-            # In stagewise mode, all blocks share a single "stagewise" stage.
-            # This allows history sharing across consecutive blocks as per exp.md §6.3.
-            return "stagewise"
-        elif self.config.mode in ["bottleneck", "bottleneck_decoder"]:
+            if block_type == "decoder":
+                # Each decoder block gets its own stage
+                return f"decoder_{block_idx}"
+            # In stagewise mode, divide blocks into separate stages.
+            # Each stage maintains its own history for independent feature learning.
+            # For 4 blocks: stage 0 = blocks 0-1, stage 1 = blocks 2-3
+            # For 2 blocks: stage 0 = block 0, stage 1 = block 1
+            # General: group consecutive blocks into pairs
+            stage_idx = block_idx // 2  # Integer division for pairing
+            return f"stage_{stage_idx}"
+        elif self.config.mode == "bottleneck":
+            if block_type == "decoder":
+                return "decoder"
+            if block_idx < self.config.bottleneck_start_idx:
+                return "encoder"
+            else:
+                return "bottleneck"
+        elif self.config.mode == "bottleneck_decoder":
+            if block_type == "decoder":
+                # Decoder blocks share a common decoder stage history
+                return "decoder"
             if block_idx < self.config.bottleneck_start_idx:
                 return "encoder"
             else:
                 return "bottleneck"
         else:
+            if block_type == "decoder":
+                return "decoder_global"
             return "global"
 
     def initialize_stage(self, stage_name: str):
@@ -68,6 +88,7 @@ class StageHistoryManager:
         feature: torch.Tensor,
         block_idx: int,
         total_blocks: int,
+        block_type: str = "resblock",
     ):
         """Add a feature map to the appropriate stage history.
 
@@ -75,8 +96,9 @@ class StageHistoryManager:
             feature: Feature map tensor (B, C, H, W)
             block_idx: Index of the producing block
             total_blocks: Total number of blocks
+            block_type: Type of block ("resblock" or "decoder")
         """
-        stage_name = self.get_stage_name(block_idx, total_blocks)
+        stage_name = self.get_stage_name(block_idx, total_blocks, block_type)
         self.initialize_stage(stage_name)
 
         # Add feature to history
@@ -91,17 +113,19 @@ class StageHistoryManager:
         self,
         block_idx: int,
         total_blocks: int,
+        block_type: str = "resblock",
     ) -> List[torch.Tensor]:
         """Get history for a specific block.
 
         Args:
             block_idx: Index of the requesting block
             total_blocks: Total number of blocks
+            block_type: Type of block ("resblock" or "decoder")
 
         Returns:
             List of historical feature maps
         """
-        stage_name = self.get_stage_name(block_idx, total_blocks)
+        stage_name = self.get_stage_name(block_idx, total_blocks, block_type)
         self.initialize_stage(stage_name)
         return self.histories[stage_name].copy()
 
@@ -109,6 +133,7 @@ class StageHistoryManager:
         self,
         block_idx: int,
         total_blocks: int,
+        block_type: str = "resblock",
     ) -> int:
         """Get effective history length for a block.
 
@@ -117,11 +142,12 @@ class StageHistoryManager:
         Args:
             block_idx: Index of the block
             total_blocks: Total number of blocks
+            block_type: Type of block ("resblock" or "decoder")
 
         Returns:
             Effective history length
         """
-        history = self.get_history(block_idx, total_blocks)
+        history = self.get_history(block_idx, total_blocks, block_type)
         return len(history)
 
     def clear(self):

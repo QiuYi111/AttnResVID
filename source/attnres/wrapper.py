@@ -14,6 +14,81 @@ from .gated_residual import GatedAttnResidual
 from .history_manager import StageHistoryManager
 
 
+class AttnResDecoderWrapper(nn.Module):
+    """Wrapper for decoder blocks (ConvBlock) to add Attention-Residual functionality.
+
+    This wraps a standard ConvBlock (decoder block) and adds AttnRes functionality.
+
+    Args:
+        block: The original ConvBlock to wrap
+        config: AttnResConfig containing all hyperparameters
+        block_idx: Index of this decoder block
+        num_channels: Number of channels for AttnRes modules
+        use_attnres: Whether this block should use AttnRes
+    """
+
+    def __init__(
+        self,
+        block: nn.Module,
+        config: AttnResConfig,
+        block_idx: int,
+        num_channels: int,
+        use_attnres: bool = False,
+    ):
+        super().__init__()
+        self.block = block
+        self.config = config
+        self.block_idx = block_idx
+        self.num_channels = num_channels
+        self.use_attnres = use_attnres
+
+        # Create AttnRes components if enabled
+        if self.use_attnres:
+            self.attnres = GatedAttnResidual(
+                in_channels=num_channels,
+                out_channels=num_channels,
+                config=config,
+                block_idx=block_idx,
+            )
+        else:
+            self.attnres = None
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        history: Optional[List[torch.Tensor]] = None,
+    ) -> torch.Tensor:
+        """Forward pass with optional AttnRes.
+
+        Args:
+            x: Input tensor (B, C, H, W)
+            history: List of historical feature maps (for AttnRes)
+
+        Returns:
+            Output tensor (B, C, H, W)
+        """
+        # Run original block
+        out = self.block(x)
+
+        # Apply AttnRes if enabled and history is available
+        if self.use_attnres and self.attnres is not None and history:
+            # For decoder blocks, the residual is the output itself
+            # since decoder blocks don't have skip connections
+            attn_feat = self.attnres.aggregator(history, current=out)
+            gated_attn = self.attnres.gate(attn_feat)
+            out = out + gated_attn
+
+        return out
+
+    def get_attnres_info(self) -> dict:
+        """Get information about AttnRes for this block."""
+        if self.attnres is not None:
+            info = self.attnres.get_info()
+            info["block_type"] = "decoder"
+            return info
+        return {"use_attnres": False, "block_type": "decoder"}
+
+
 class AttnResBlockWrapper(nn.Module):
     """Wrapper for ResBlock to add Attention-Residual functionality.
 
@@ -26,6 +101,7 @@ class AttnResBlockWrapper(nn.Module):
         config: AttnResConfig containing all hyperparameters
         block_idx: Index of this block in the model
         num_channels: Number of channels for AttnRes modules
+        use_attnres: Whether this block should use AttnRes (determined by caller)
     """
 
     def __init__(
@@ -34,15 +110,14 @@ class AttnResBlockWrapper(nn.Module):
         config: AttnResConfig,
         block_idx: int,
         num_channels: int,
+        use_attnres: bool = False,
     ):
         super().__init__()
         self.block = block
         self.config = config
         self.block_idx = block_idx
         self.num_channels = num_channels
-
-        # Check if this block should use AttnRes
-        self.use_attnres = config.should_use_attnres(block_idx, total_blocks=4)
+        self.use_attnres = use_attnres
 
         # Create AttnRes components if enabled
         if self.use_attnres:
@@ -121,12 +196,14 @@ class AttnResModelWrapper(nn.Module):
         wrapped_blocks = nn.ModuleList()
 
         for i, block in enumerate(self.model.model):
-            if self.config.should_use_attnres(i, num_blocks):
+            use_attnres = self.config.should_use_attnres(i, num_blocks)
+            if use_attnres:
                 wrapped = AttnResBlockWrapper(
                     block=block,
                     config=self.config,
                     block_idx=i,
                     num_channels=self.model.num_feature,
+                    use_attnres=True,
                 )
                 wrapped_blocks.append(wrapped)
             else:

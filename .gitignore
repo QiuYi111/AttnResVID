@@ -1,5 +1,72 @@
+# DANDI datasets (large files)
+000535/
+001413/
+*.nwb
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# UV
+.python-version
+uv.lock
+
+# PyCharm
+.idea/
+
+# VSCode
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data files (large)
 **/*.tif
 **/*.tiff
 **/*.avi
-**/__pycache__/
+**/*.mp4
 /results/*/*
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Temporary files
+*.tmp
+*.log
+.DS_Store
+
+# Project indices (generated)
+PROJECT_INDEX.json
+PROJECT_INDEX.md
+
+# External dependencies
+3rdParty/
+
+# NWB cache
+*.lindi.json
