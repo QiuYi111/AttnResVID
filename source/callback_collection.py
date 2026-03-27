@@ -1,6 +1,6 @@
 import csv
 import os
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -41,7 +41,7 @@ class CallbackSaveImage(object):
         self.vmin = vmin
         self.vmax = vmax
 
-    def save(self, batch_id):
+    def save(self, batch_id, wandb_run=None):
         self.model.eval()
         y_pred = self.model(self.X_sample)
         y_pred = y_pred.cpu().detach().numpy()
@@ -54,12 +54,17 @@ class CallbackSaveImage(object):
         y_pred_plot = np.concatenate(y_pred_plot, axis=1)
 
         img = np.concatenate([y_pred_plot, self.y_true], axis=0).squeeze()
-        plt.imsave(
-            os.path.join(self.output_dir, "preview", "batch_{:d}.png".format(batch_id)),
-            img,
-            vmin=self.vmin,
-            vmax=self.vmax,
+        img_path = os.path.join(
+            self.output_dir, "preview", "batch_{:d}.png".format(batch_id)
         )
+        plt.imsave(img_path, img, vmin=self.vmin, vmax=self.vmax)
+
+        if wandb_run is not None:
+            import wandb
+            wandb_run.log(
+                {"preview": wandb.Image(img_path, caption=f"step={batch_id}")},
+                step=batch_id,
+            )
 
 
 class CallbackSaveModel(object):
@@ -106,12 +111,18 @@ class CallbackSaveModel(object):
 
 
 class Logger(object):
-    def __init__(self, output_dir: str, use_tensorboard: bool = True) -> None:
+    def __init__(
+        self,
+        output_dir: str,
+        use_tensorboard: bool = True,
+        wandb_run=None,
+    ) -> None:
         self.output_dir = output_dir
         if not os.path.isdir(os.path.join(self.output_dir)):
             os.mkdir(os.path.join(self.output_dir))
 
-        self.metrics = []
+        self.metrics: List[Dict] = []
+        self.wandb_run = wandb_run
 
         if use_tensorboard is True:
             self.tensorboard_writer = SummaryWriter(
@@ -132,6 +143,9 @@ class Logger(object):
         if self.tensorboard_writer is not None:
             for key in metrics_dict:
                 self.tensorboard_writer.add_scalar(key, metrics_dict[key], step)
+
+        if self.wandb_run is not None:
+            self.wandb_run.log(metrics_dict, step=step)
 
     def save(self) -> None:
         if not self.metrics:

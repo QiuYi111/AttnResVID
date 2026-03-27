@@ -1,0 +1,4 @@
+# @package _global_
+# wandb disabled
+wandb:
+  enabled: false

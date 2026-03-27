@@ -138,6 +138,20 @@ class BaseVIDWorker(BaseWorker):
             self.output_file = args.output_file
             self.output_dtype = args.output_dtype
 
+        # wandb params (optional — safe to omit for non-wandb runs)
+        self.wandb_enabled = getattr(args, "wandb_enabled", False)
+        self.wandb_project = getattr(args, "wandb_project", "attnresvid")
+        self.wandb_entity = getattr(args, "wandb_entity", None)
+        self.wandb_run_name = getattr(args, "wandb_run_name", None) or self.model_string
+        self.wandb_tags = getattr(args, "wandb_tags", [])
+        self.wandb_notes = getattr(args, "wandb_notes", "")
+        self.wandb_log_images = getattr(args, "wandb_log_images", True)
+        self.wandb_log_gate_values = getattr(args, "wandb_log_gate_values", True)
+        self.wandb_watch_model = getattr(args, "wandb_watch_model", False)
+        self.wandb_watch_log_freq = getattr(args, "wandb_watch_log_freq", 100)
+        self._wandb_run = None
+        self._args = args  # keep full args for wandb config logging
+
     def init_device(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print("Device:", self.device)
@@ -231,12 +245,49 @@ class BaseVIDWorker(BaseWorker):
         if self.use_amp:
             self.scaler = torch.cuda.amp.GradScaler()
 
+    def init_wandb(self):
+        """Initialize a wandb run if wandb is enabled."""
+        if not self.wandb_enabled:
+            return
+        import wandb
+        import argparse
+
+        # Build a flat config dict from the full args namespace
+        try:
+            config_dict = vars(self._args)
+        except TypeError:
+            config_dict = {}
+
+        self._wandb_run = wandb.init(
+            project=self.wandb_project,
+            entity=self.wandb_entity,
+            name=self.wandb_run_name,
+            tags=list(self.wandb_tags) if self.wandb_tags else [],
+            notes=self.wandb_notes,
+            config=config_dict,
+            dir=self.output_dir,
+            resume="allow",
+        )
+        if self.wandb_watch_model:
+            self._wandb_run.watch(
+                self.model,
+                log="all",
+                log_freq=self.wandb_watch_log_freq,
+            )
+        print(f"[wandb] Run URL: {self._wandb_run.url}")
+
     def init_callback(self):
+        if self.wandb_enabled:
+            self.init_wandb()
+
         self.callback_save_image = cc.CallbackSaveImage(
             self.dataset_val, self.model, self.device, self.output_dir
         )
         self.callback_save_model = cc.CallbackSaveModel(self.output_dir)
-        self.logger = cc.Logger(self.output_dir)
+        self.logger = cc.Logger(
+            self.output_dir,
+            wandb_run=self._wandb_run,
+        )
 
 
 class DeepVIDv2Worker(BaseVIDWorker):
@@ -346,8 +397,21 @@ class DeepVIDv2Worker(BaseVIDWorker):
                     )
                 )
 
+                # Log AttnRes gate values if available
+                if self.wandb_log_gate_values and self._wandb_run is not None:
+                    if hasattr(self.model, "get_gate_values"):
+                        gate_vals = self.model.get_gate_values()
+                        if gate_vals:
+                            self._wandb_run.log(
+                                {f"gate/{k}": v for k, v in gate_vals.items()},
+                                step=step,
+                            )
+
                 if step % self.step_save_image == 0 and step > 0:
-                    self.callback_save_image.save(step)
+                    wandb_run_for_img = (
+                        self._wandb_run if self.wandb_log_images else None
+                    )
+                    self.callback_save_image.save(step, wandb_run=wandb_run_for_img)
                     self.model.train()
                     self.logger.save()
 
@@ -457,6 +521,19 @@ class DeepVIDv2Worker(BaseVIDWorker):
             self.callback_save_model.update(self.model, self.optimizer)
             self.callback_save_model.save()
             self.logger.save()
+
+            if self._wandb_run is not None:
+                # Save final checkpoint as wandb artifact
+                ckpt_path = os.path.join(
+                    self.output_dir, "checkpoint", "checkpoint_final.ckpt"
+                )
+                if os.path.exists(ckpt_path):
+                    artifact = self._wandb_run.log_artifact(
+                        ckpt_path,
+                        name=f"model-{self.model_string}",
+                        type="model",
+                    )
+                self._wandb_run.finish()
 
         elif self.mode == "inference":
             self.inference()

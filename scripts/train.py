@@ -89,13 +89,19 @@ def build_attnres_config(cfg: DictConfig) -> AttnResConfig:
 def run_worker(cfg: DictConfig):
     args = cfg_to_namespace(cfg)
 
-    # Promote dataset/network/worker keys to top-level on args
+    # Promote dataset/network/worker/wandb keys to top-level on args
     # (DeepVIDv2 and worker expect flat namespace)
     for group in ("dataset", "network", "worker", "pruning"):
         group_cfg = getattr(cfg, group, None)
         if group_cfg is not None:
             for k, v in OmegaConf.to_container(group_cfg, resolve=True).items():
                 setattr(args, k, v)
+
+    # Flatten wandb config with "wandb_" prefix so worker can pick it up
+    wandb_cfg = cfg.get("wandb", None)
+    if wandb_cfg is not None:
+        for k, v in OmegaConf.to_container(wandb_cfg, resolve=True).items():
+            setattr(args, f"wandb_{k}", v)
 
     attnres_config = build_attnres_config(cfg)
 
