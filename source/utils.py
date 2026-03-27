@@ -3,6 +3,7 @@ https://github.com/AllenInstitute/deepinterpolation/blob/master/deepinterpolatio
 """
 
 import json
+from dataclasses import asdict, is_dataclass
 
 import torch
 import torch.nn as nn
@@ -89,9 +90,27 @@ class JsonSaver:
         Returns:
         None
         """
+        def convert_to_serializable(obj):
+            """Convert non-serializable objects to serializable format."""
+            if is_dataclass(obj):
+                return asdict(obj)
+            elif hasattr(obj, '__dict__'):
+                return obj.__dict__
+            return str(obj)
+
+        serializable_dict = {}
+        for key, value in self.dict.items():
+            try:
+                # Test if value is JSON serializable
+                json.dumps(value)
+                serializable_dict[key] = value
+            except (TypeError, ValueError):
+                # Convert if not serializable
+                serializable_dict[key] = convert_to_serializable(value)
+
         if isinstance(self.dict, dict):
             with open(path, "w") as f:
-                json.dump(self.dict, f, indent=4)
+                json.dump(serializable_dict, f, indent=4)
         elif isinstance(self.dict, list):
             with open(path, "w") as f:
                 for line in self.dict:

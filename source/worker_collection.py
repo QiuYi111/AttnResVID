@@ -220,7 +220,6 @@ class BaseVIDWorker(BaseWorker):
                 patience=200,
                 threshold=1e-3,
                 min_lr=1e-7,
-                verbose=True,
             )
         else:
             NotImplementedError(
