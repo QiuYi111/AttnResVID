@@ -1,0 +1,14 @@
+# @package _global_
+# Wanda pruning configuration
+# Ref: "A Simple and Effective Pruning Approach for Large Language Models" (Sun et al., 2023)
+# Adapted for CNN: prune Conv2d weights by |W| * ||x||_2
+pruning:
+  enabled: true
+  method: wanda
+  sparsity: 0.5             # fraction of weights to prune (0.0 to 1.0)
+  scope: local              # "local" (per-layer) or "global" (across all layers)
+  prune_layers:             # which layer types to prune (null = all Conv2d)
+    - Conv2d
+  calibration_batches: 32   # number of batches to collect activations for scoring
+  prune_after_epoch: 0      # prune after this epoch (0 = before training)
+  structured: false         # false = unstructured, true = channel-wise structured

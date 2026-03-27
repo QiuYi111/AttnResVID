@@ -39,6 +39,7 @@ class GatedAttnResidual(nn.Module):
         out_channels: int,
         config: AttnResConfig,
         block_idx: int = 0,
+        shared_aggregator: Optional["DepthAttentionAggregator"] = None,
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -49,17 +50,24 @@ class GatedAttnResidual(nn.Module):
         # Determine effective history length for this block
         self.history_len = config.get_effective_history_len(block_idx)
 
-        # Create attention aggregator
+        # Create attention aggregator (or use shared one)
         if config.fusion_mode == "attention":
-            self.aggregator = DepthAttentionAggregator(
-                num_channels=out_channels,
-                history_len=self.history_len,
-                temperature=config.temperature,
-                score_fn=config.score_fn,
-                detach_history=config.detach_history,
-            )
+            if shared_aggregator is not None:
+                # Share aggregator across blocks (no own parameters for aggregation)
+                self.aggregator = shared_aggregator
+                self._owns_aggregator = False
+            else:
+                self.aggregator = DepthAttentionAggregator(
+                    num_channels=out_channels,
+                    history_len=self.history_len,
+                    temperature=config.temperature,
+                    score_fn=config.score_fn,
+                    detach_history=config.detach_history,
+                )
+                self._owns_aggregator = True
         else:
             self.aggregator = None
+            self._owns_aggregator = False
 
         # Create learnable gate
         if config.fusion_mode in ["attention", "gate_only"]:

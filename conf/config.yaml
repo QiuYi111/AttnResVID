@@ -1,0 +1,17 @@
+# Main Hydra configuration for AttnResVID
+# Composes sub-configs from each group
+
+defaults:
+  - dataset: default
+  - network: default
+  - attnres: off
+  - worker: default
+  - pruning: none
+  - _self_
+
+# Top-level overrides
+hydra:
+  run:
+    dir: results/${now:%Y%m%d-%H%M%S}
+  job:
+    chdir: true

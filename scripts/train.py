@@ -1,9 +1,11 @@
-import os
+"""Training script for AttnResVID using Hydra configuration."""
 
-import argparse
+import os
 import datetime
 import pathlib
 
+import hydra
+from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import ConcatDataset
 
 from source.dataset_collection import DeepVIDv2Dataset
@@ -13,172 +15,142 @@ from source.utils import JsonSaver, log_model_info
 from source.attnres.config import AttnResConfig
 
 
-def get_parser(parent=None):
-    if parent is None:
-        parser = argparse.ArgumentParser()
+def cfg_to_namespace(cfg: DictConfig):
+    """Convert a flat or nested DictConfig to a simple argparse-style namespace."""
+    import argparse
+    flat = {}
+    for group in ("dataset", "network", "attnres", "worker", "pruning"):
+        if group in cfg:
+            flat.update(OmegaConf.to_container(cfg[group], resolve=True))
+    # Also include top-level keys (e.g. from _self_)
+    for k, v in cfg.items():
+        if k not in ("dataset", "network", "attnres", "worker", "pruning", "hydra"):
+            flat[k] = v
+    return argparse.Namespace(**flat)
+
+
+def process_cfg(cfg: DictConfig) -> DictConfig:
+    """Resolve dynamic defaults that depend on other config values."""
+    # Determine if data source is a folder
+    noisy_data_paths = list(cfg.dataset.noisy_data_paths)
+    if os.path.isdir(noisy_data_paths[0]):
+        is_folder = True
+        root = noisy_data_paths[0]
+        filenames = sorted(os.listdir(root))
+        noisy_data_paths = [os.path.join(root, f) for f in filenames]
+        OmegaConf.update(cfg, "dataset.noisy_data_paths", noisy_data_paths)
     else:
-        parser = parent.add_parser("train", help="train mode")
+        is_folder = False
 
-    parser.set_defaults(mode="train")
-    # fmt: off
-    # dataset params
-    dataset_group = parser.add_argument_group("dataset", "dataset parameters")
-    dataset_group.add_argument("--noisy-data-paths", "--noisy", type=str, default=["./datasets", ], nargs="+", help="path to noisy data")
-    dataset_group.add_argument("-n", "--input-pre-post-frame", "--input", type=int, default=3, help="# of input frames (N)")
-    dataset_group.add_argument("-m", "--edge-pre-post-frame", "--edge", type=int, default=None, help="# of edge frames (M)")
+    OmegaConf.update(cfg, "dataset.is_folder", is_folder, merge=True)
 
-    dataset_group.add_argument("--pre-post-omission", type=int, default=0, help="# of omitted frames")
-    dataset_group.add_argument("--blind-pixel-ratio", type=float, default=0.005, help="ratio of blind pixels")
-    dataset_group.add_argument("--blind-pixel-method", type=str, default="replace", help="method of blind pixels")
-    dataset_group.add_argument("--edge-gaussian-size", type=int, default=9, help="size of the gaussian kernel for edge extraction")
-    dataset_group.add_argument("--edge-gaussian-sigma", type=float, default=1.0, help="sigma of the gaussian kernel for edge extraction")
-    dataset_group.add_argument("--edge-source-frame", type=str, default="mean", help="source frame for edge extraction")
+    # Auto learning rate
+    if cfg.worker.learning_rate is None:
+        lr = 5e-6 if is_folder else 1e-4
+        OmegaConf.update(cfg, "worker.learning_rate", lr)
 
-    # network params
-    network_group = parser.add_argument_group("network", "network parameters")
-    network_group.add_argument("--kernel-size", type=int, default=3, help="size of the kernel")
-    network_group.add_argument("--stride", type=int, default=2, help="size of the stride")
-    network_group.add_argument("--padding", type=int, default=1, help="size of the padding")
-    network_group.add_argument("--out-channels", type=int, default=1, help="# of output channels")
-    network_group.add_argument("--num-feature", type=int, default=64, help="# of features")
-    network_group.add_argument("--num-blocks", type=int, default=4, help="# of blocks")
-    network_group.add_argument("--norm-type", type=str, default="batch", help="type of normalization")
-    network_group.add_argument("--activation-type", type=str, default="prelu", help="type of activation")
-    network_group.add_argument("--resblock-activation-out-type", type=str, default=None, help="type of resblock activation")
+    # Auto batch_per_step
+    if cfg.worker.batch_per_step is None:
+        bps = 360 if is_folder else 12
+        OmegaConf.update(cfg, "worker.batch_per_step", bps)
 
-    # Attention-Residual (AttnRes) params
-    attnres_group = parser.add_argument_group("attnres", "Attention-Residual parameters")
-    attnres_group.add_argument("--attnres-enabled", action="store_true", help="Enable Attention-Residual mechanism")
-    attnres_group.add_argument("--attnres-mode", type=str, choices=["off", "bottleneck", "bottleneck_decoder", "stagewise"], default="bottleneck", help="AttnRes mode: which blocks use attention")
-    attnres_group.add_argument("--attnres-history-len", type=int, default=2, help="Number of historical feature maps to aggregate")
-    attnres_group.add_argument("--attnres-temperature", type=float, default=1.0, help="Softmax temperature for attention (lower = sharper)")
-    attnres_group.add_argument("--attnres-gate-init", type=float, default=0.0, help="Initial value for learnable gate (0 = start as identity)")
-    attnres_group.add_argument("--attnres-score-fn", type=str, choices=["gap_linear", "conv1x1_gap_linear"], default="gap_linear", help="Method to compute attention scores")
-    attnres_group.add_argument("--attnres-gate-type", type=str, choices=["scalar", "channel"], default="scalar", help="Type of gating (scalar or per-channel)")
-    attnres_group.add_argument("--attnres-detach-history", action="store_true", help="Detach history from computation graph (stability)")
-    attnres_group.add_argument("--attnres-fusion-mode", type=str, choices=["attention", "concat", "gate_only"], default="attention", help="How to combine features")
-    attnres_group.add_argument("--attnres-share-proj", action="store_true", help="Share projection parameters across blocks")
-    attnres_group.add_argument("--attnres-bottleneck-start-idx", type=int, default=2, help="Index where bottleneck blocks start")
-    attnres_group.add_argument("--attnres-decoder-enabled", action="store_true", help="Extend AttnRes to decoder blocks")
+    # Derived: number of input channels
+    n = cfg.dataset.input_pre_post_frame
+    OmegaConf.update(cfg, "dataset.in_channels", n * 2 + 1 + 4, merge=True)
 
-    # training worker params
-    worker_group = parser.add_argument_group("worker", "worker parameters")
-    # worker params
-    worker_group.add_argument("--model-string", "--model", type=str, default=None, help="model string")
-    worker_group.add_argument("--num-times-through-data", "--epochs", type=int, default=3, help="# of times through data")
-    worker_group.add_argument("--batch-per-step", type=int, default=None, help="# of batches per step")
-    # dataset params
-    worker_group.add_argument("--batch-size", type=int, default=4, help="size of the batch")
-    worker_group.add_argument("--num-workers", type=int, default=0, help="# of workers")
-    worker_group.add_argument("--num-sample-val", type=int, default=1000, help="# of validation samples")
-    worker_group.add_argument("--sampler-val-type", type=str, default="SubsetRandomSampler", help="type of sampler")
-    # scaler params
-    worker_group.add_argument("--no-amp", action="store_true", help="disable automatic mixed precision")
-    # loss params
-    worker_group.add_argument("--loss-type", type=str, default="mse_with_mask", help="type of loss")
-    worker_group.add_argument("--l1-reg", type=float, default=1e-2, help="L1 regularization")
-    worker_group.add_argument("--l2-reg", type=float, default=1e-2, help="L2 regularization")
-    # optimizer params
-    worker_group.add_argument("--learning-rate", type=float, default=None, help="learning rate")
-    # scheduler params
-    worker_group.add_argument("--scheduler-type", type=str, default="ReduceLROnPlateau", help="type of scheduler")
-    # callback params
-    worker_group.add_argument("--step-save-model", type=int, default=500, help="step to save model")
-    worker_group.add_argument("--step-save-image", type=int, default=100, help="step to save image")
-
-    # fmt: on
-    if parent is None:
-        return parser
-    else:
-        return parent
-
-
-def process_args(args):
-    # if noisy_data is folder, load all files in the folder
-    if os.path.isdir(args.noisy_data_paths[0]):
-        args.is_folder = True
-        root = args.noisy_data_paths[0]
-        filenames = os.listdir(root)
-        filenames.sort()
-        args.noisy_data_paths = [os.path.join(root, filename) for filename in filenames]
-    else:
-        args.is_folder = False
-
-    # init params if not set
-    if args.learning_rate is None:
-        if args.is_folder:
-            args.learning_rate = 5e-6
-        else:
-            args.learning_rate = 1e-4
-
-    if args.batch_per_step is None:
-        if args.is_folder:
-            args.batch_per_step = 360
-        else:
-            args.batch_per_step = 12
-
-    # set params
-    args.in_channels = args.input_pre_post_frame * 2 + 1 + 4  # number of input channels
-    if args.model_string is None:
+    # Auto model_string
+    if cfg.worker.model_string is None:
         run_uid = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-        args.model_string = run_uid
-    args.output_dir = os.path.join(
-        pathlib.Path(__file__).parent.absolute(),
-        "..",
-        "results",
-        args.model_string,
+        OmegaConf.update(cfg, "worker.model_string", run_uid)
+
+    return cfg
+
+
+def build_attnres_config(cfg: DictConfig) -> AttnResConfig:
+    a = cfg.attnres
+    if not a.enabled:
+        return AttnResConfig(enabled=False)
+    return AttnResConfig(
+        enabled=True,
+        mode=a.mode,
+        history_len=a.history_len,
+        temperature=a.temperature,
+        gate_init=a.gate_init,
+        score_fn=a.score_fn,
+        gate_type=a.gate_type,
+        detach_history=a.detach_history,
+        fusion_mode=a.fusion_mode,
+        share_proj=a.share_proj,
+        bottleneck_start_idx=a.bottleneck_start_idx,
+        decoder_blocks=1 if a.decoder_enabled else 0,
     )
 
-    # Create AttnRes config from args
-    args.attnres_config = AttnResConfig.from_args(args)
 
-    return args
+def run_worker(cfg: DictConfig):
+    args = cfg_to_namespace(cfg)
 
+    # Promote dataset/network/worker keys to top-level on args
+    # (DeepVIDv2 and worker expect flat namespace)
+    for group in ("dataset", "network", "worker", "pruning"):
+        group_cfg = getattr(cfg, group, None)
+        if group_cfg is not None:
+            for k, v in OmegaConf.to_container(group_cfg, resolve=True).items():
+                setattr(args, k, v)
 
-def run_worker(args):
-    # create dataset
+    attnres_config = build_attnres_config(cfg)
+
+    # Create datasets
     print("Creating dataset...")
-    args_local = argparse.Namespace(**vars(args))
+    import argparse
     dataset_list = []
-    for noisy_data_path in args.noisy_data_paths:
-        args_local.noisy_data_path = noisy_data_path
-        dataset_local = DeepVIDv2Dataset(args_local)
-        dataset_list.append(dataset_local)
+    for path in cfg.dataset.noisy_data_paths:
+        args_local = argparse.Namespace(**vars(args))
+        args_local.noisy_data_path = path
+        dataset_list.append(DeepVIDv2Dataset(args_local))
     dataset = ConcatDataset(dataset_list)
 
-    # create network
+    # Create network
     print("Creating network...")
-    network = DeepVIDv2(args, attnres_config=args.attnres_config)
+    network = DeepVIDv2(args, attnres_config=attnres_config)
 
-    # log model info
+    # Log model info
     print("Logging model info...")
-    input_size = (args.batch_size, args.in_channels, 64, 64)  # Default spatial size
-    log_model_info(network, args.output_dir, input_size=(1, args.in_channels, 64, 64))
+    output_dir = os.path.join(
+        pathlib.Path(__file__).parent.absolute(), "..", "results", cfg.worker.model_string
+    )
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(output_dir, "config"), exist_ok=True)
+    log_model_info(network, output_dir, input_size=(1, args.in_channels, 64, 64))
 
-    # create worker
+    # Save resolved config
+    config_path = os.path.join(output_dir, "config", "config_train.yaml")
+    OmegaConf.save(cfg, config_path)
+    # Also save JSON for backward compatibility with inference script
+    json_path = os.path.join(output_dir, "config", "config_train.json")
+    JsonSaver(OmegaConf.to_container(cfg, resolve=True)).save_json(json_path)
+
+    # Apply Wanda pruning before training if requested
+    pruning_cfg = cfg.get("pruning", None)
+    pruner = None
+    if pruning_cfg and pruning_cfg.enabled and pruning_cfg.get("prune_after_epoch", 0) == 0:
+        from source.pruning.wanda import WandaPruner
+        print(f"Applying Wanda pruning (sparsity={pruning_cfg.sparsity})...")
+        pruner = WandaPruner(network, cfg=pruning_cfg)
+        pruner.prune(dataset, args)
+
+    # Create and run worker
     print("Creating worker...")
+    args.output_dir = output_dir
     trainer = DeepVIDv2Worker(dataset, network, args)
-
-    # run worker
     print("Running worker...")
     trainer.run()
 
 
+@hydra.main(version_base=None, config_path="../conf", config_name="config")
+def main(cfg: DictConfig) -> None:
+    cfg = process_cfg(cfg)
+    run_worker(cfg)
+
+
 if __name__ == "__main__":
-    parser = get_parser()
-    args = parser.parse_args()
-
-    args = process_args(args)
-
-    # make output directory
-    os.makedirs(args.output_dir, exist_ok=True)
-    os.makedirs(os.path.join(args.output_dir, "config"), exist_ok=True)
-
-    # save config
-    sorted_args = dict(sorted(vars(args).items()))
-    path_config = os.path.join(args.output_dir, "config", "config_train.json")
-    json_obj = JsonSaver(sorted_args)
-    json_obj.save_json(path_config)
-
-    # run worker
-    run_worker(args)
+    main()

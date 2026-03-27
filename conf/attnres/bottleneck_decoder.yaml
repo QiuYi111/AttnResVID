@@ -1,0 +1,15 @@
+# @package _global_
+# AttnRes on bottleneck + decoder blocks
+attnres:
+  enabled: true
+  mode: bottleneck_decoder
+  history_len: 2
+  temperature: 1.0
+  gate_init: 0.0
+  score_fn: gap_linear
+  gate_type: scalar
+  detach_history: false
+  fusion_mode: attention
+  share_proj: false
+  bottleneck_start_idx: 2
+  decoder_enabled: true

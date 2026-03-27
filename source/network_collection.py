@@ -304,11 +304,24 @@ class DeepVIDv2(BaseModule):
     def _apply_attnres(self):
         """Wrap ResBlocks and decoder blocks with AttnRes functionality."""
         from source.attnres.wrapper import AttnResBlockWrapper, AttnResDecoderWrapper
+        from source.attnres.aggregator import DepthAttentionAggregator
         from source.attnres.history_manager import StageHistoryManager
 
         config = self.attnres_config
         num_blocks = len(self.model)
         wrapped_blocks = nn.ModuleList()
+
+        # Create a single shared aggregator when share_proj=True
+        shared_aggregator = None
+        if config.share_proj and config.fusion_mode == "attention":
+            shared_aggregator = DepthAttentionAggregator(
+                num_channels=self.num_feature,
+                history_len=config.history_len,
+                temperature=config.temperature,
+                score_fn=config.score_fn,
+                detach_history=config.detach_history,
+            )
+            self.shared_aggregator = shared_aggregator  # register as submodule
 
         # Wrap ResBlocks (encoder/bottleneck)
         for i, block in enumerate(self.model):
@@ -320,6 +333,7 @@ class DeepVIDv2(BaseModule):
                     block_idx=i,
                     num_channels=self.num_feature,
                     use_attnres=True,
+                    shared_aggregator=shared_aggregator,
                 )
                 wrapped_blocks.append(wrapped)
             else:

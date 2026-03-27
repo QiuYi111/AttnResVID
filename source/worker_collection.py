@@ -223,7 +223,7 @@ class BaseVIDWorker(BaseWorker):
                 verbose=True,
             )
         else:
-            NotImplementedError(
+            raise NotImplementedError(
                 "Unsupported scheduler type: {}".format(self.scheduler_type)
             )
 

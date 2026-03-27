@@ -1,0 +1,17 @@
+# @package _global_
+worker:
+  model_string: null          # null = auto timestamp
+  num_times_through_data: 3   # epochs
+  batch_per_step: null        # null = auto (12 single / 360 folder)
+  batch_size: 4
+  num_workers: 0
+  num_sample_val: 1000
+  sampler_val_type: SubsetRandomSampler
+  use_amp: true               # automatic mixed precision
+  loss_type: mse_with_mask
+  l1_reg: 0.01
+  l2_reg: 0.01
+  learning_rate: null         # null = auto (1e-4 single / 5e-6 folder)
+  scheduler_type: ReduceLROnPlateau
+  step_save_model: 500
+  step_save_image: 100

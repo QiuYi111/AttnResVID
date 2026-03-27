@@ -10,6 +10,7 @@ import torch.nn as nn
 from typing import List, Optional
 
 from .config import AttnResConfig
+from .aggregator import DepthAttentionAggregator
 from .gated_residual import GatedAttnResidual
 from .history_manager import StageHistoryManager
 
@@ -102,6 +103,7 @@ class AttnResBlockWrapper(nn.Module):
         block_idx: Index of this block in the model
         num_channels: Number of channels for AttnRes modules
         use_attnres: Whether this block should use AttnRes (determined by caller)
+        shared_aggregator: Optional shared DepthAttentionAggregator (for share_proj)
     """
 
     def __init__(
@@ -111,6 +113,7 @@ class AttnResBlockWrapper(nn.Module):
         block_idx: int,
         num_channels: int,
         use_attnres: bool = False,
+        shared_aggregator: Optional[DepthAttentionAggregator] = None,
     ):
         super().__init__()
         self.block = block
@@ -126,6 +129,7 @@ class AttnResBlockWrapper(nn.Module):
                 out_channels=num_channels,
                 config=config,
                 block_idx=block_idx,
+                shared_aggregator=shared_aggregator,
             )
         else:
             self.attnres = None
